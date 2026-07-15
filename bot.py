@@ -31,6 +31,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     filters,
 )
 from telegram.error import TelegramError
@@ -1857,6 +1858,9 @@ async def _finalize_registration(update: Update, context: ContextTypes.DEFAULT_T
 
     await db_call(db.log_flow_event, telegram_id, "contractor_register", "completed")
 
+    # اگر قبلاً روی لینک کانال کلیک کرده و درخواستش pending مانده، خودکار تایید شود
+    await approve_pending_join_request(context, telegram_id)
+
     context.user_data.clear()
     context.user_data["role"] = CONTRACTOR_ROLE
 
@@ -2601,6 +2605,118 @@ async def job_rating_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# کانال پیمانکاران: مدیریت درخواست عضویت (Join Request)
+# ============================================================
+# لینک کانال باید در حالت «تایید عضویت توسط ادمین» (Approve New Members)
+# باشد و ربات باید ادمین کانال با دسترسی Invite Users باشد.
+#
+# منطق:
+# - اگر درخواست‌دهنده در جدول contractors ثبت‌نام کرده باشد → تایید خودکار.
+# - اگر ثبت‌نام نکرده باشد → درخواست «رد نمی‌شود» بلکه pending می‌ماند و
+#   پیام راهنما برایش ارسال می‌شود؛ به محض تکمیل ثبت‌نام در ربات،
+#   درخواستش به‌صورت خودکار تایید می‌شود.
+#   (دلیل: طبق رفتار تلگرام، اگر درخواست decline شود کاربر تا مدتی
+#   نمی‌تواند دوباره از همان لینک درخواست بدهد.)
+
+async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    join_request = update.chat_join_request
+    if not join_request:
+        return
+
+    # فقط کانال پیمانکاران را مدیریت کن
+    if CONTRACTOR_CHANNEL_ID and join_request.chat.id != CONTRACTOR_CHANNEL_ID:
+        return
+
+    user = join_request.from_user
+    # طبق مستندات، برای پیام دادن به درخواست‌دهنده باید از user_chat_id استفاده شود
+    user_chat_id = join_request.user_chat_id
+
+    contractor = await db_call(db.get_contractor_by_telegram_id, user.id)
+
+    if contractor:
+        try:
+            await join_request.approve()
+            logger.info(f"✅ درخواست عضویت پیمانکار {user.id} در کانال تایید شد.")
+        except TelegramError as e:
+            logger.error(f"خطا در تایید درخواست عضویت {user.id}: {e}")
+            return
+
+        try:
+            await context.bot.send_message(
+                chat_id=user_chat_id,
+                text=(
+                    "✅ درخواست عضویت شما در کانال پیمانکاران تایید شد.\n\n"
+                    "از این پس پروژه‌های جدید را در کانال می‌بینید و می‌توانید "
+                    "با دکمه «اعلام آمادگی» اقدام کنید."
+                ),
+            )
+        except TelegramError:
+            pass
+
+        return
+
+    # ثبت‌نام نکرده → درخواست pending می‌ماند + پیام راهنما
+    logger.info(f"⛔ درخواست عضویت کاربر ثبت‌نام‌نشده {user.id} — در انتظار ثبت‌نام.")
+
+    bot_username = context.bot.username
+    try:
+        await context.bot.send_message(
+            chat_id=user_chat_id,
+            text=(
+                "👋 سلام!\n\n"
+                "این کانال مخصوص پیمانکارانی است که در ربات «شمال‌پروژه» "
+                "ثبت‌نام کرده‌اند.\n\n"
+                "⛔ شما هنوز در ربات ثبت‌نام نکرده‌اید.\n\n"
+                "لطفاً ابتدا وارد ربات شوید، /start را بزنید و به‌عنوان "
+                "پیمانکار ثبت‌نام کنید. بلافاصله بعد از تکمیل ثبت‌نام، "
+                "عضویت شما در کانال به‌صورت خودکار تایید می‌شود ✅"
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🤖 ورود به ربات و ثبت‌نام",
+                            url=f"https://t.me/{bot_username}",
+                        )
+                    ]
+                ]
+            ),
+        )
+    except TelegramError as e:
+        logger.warning(f"ارسال پیام راهنما به {user.id} ممکن نشد: {e}")
+
+
+async def approve_pending_join_request(context: ContextTypes.DEFAULT_TYPE, telegram_id: int):
+    """
+    بعد از تکمیل ثبت‌نام پیمانکار صدا زده می‌شود.
+    اگر کاربر قبلاً روی لینک کانال کلیک کرده و درخواستش pending مانده باشد،
+    همین‌جا خودکار تایید می‌شود. اگر درخواستی وجود نداشته باشد، تلگرام خطا
+    می‌دهد که بی‌صدا نادیده گرفته می‌شود.
+    """
+    if not CONTRACTOR_CHANNEL_ID:
+        return
+
+    try:
+        await context.bot.approve_chat_join_request(
+            chat_id=CONTRACTOR_CHANNEL_ID,
+            user_id=telegram_id,
+        )
+        logger.info(f"✅ درخواست عضویت pending کاربر {telegram_id} پس از ثبت‌نام تایید شد.")
+
+        try:
+            await context.bot.send_message(
+                chat_id=telegram_id,
+                text="✅ عضویت شما در کانال پیمانکاران تایید شد!",
+            )
+        except TelegramError:
+            pass
+
+    except TelegramError:
+        # درخواست pending وجود نداشت — طبیعی است
+        pass
+
+
+# ============================================================
 # Error Handler
 # ============================================================
 
@@ -2829,6 +2945,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel_generic))
+
+    # هندلر درخواست عضویت در کانال پیمانکاران (Join Request)
+    app.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
 
     # هندلر اعلام آمادگی از دکمه داخل کانال
     app.add_handler(
