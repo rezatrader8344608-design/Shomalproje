@@ -755,7 +755,7 @@ async def handle_apply_project_callback(update: Update, context: ContextTypes.DE
             )
             return
 
-        remaining_credit = result.get("remaining_credit", contractor.get("credits", 0))
+        remaining_credit = result.get("remaining_credit", contractor.get("credit", 0))
 
         await db_call(
             db.log_flow_event,

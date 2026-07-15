@@ -4,7 +4,7 @@ db.py — نسخه نهایی سازگار با schema فعلی Supabase و bot.
 Schema اصلی:
 - app_settings(key,value,updated_at)
 - customers(id,telegram_id,full_name,created_at,is_test)
-- contractors(id,telegram_id,full_name,phone,city,categories,credit,is_vip,referred_by,created_at,phone2,portfolio_files,bio,resume,social_link,is_test)
+- contractors(id,telegram_id,full_name,phone,city,categories,credits,is_vip,referred_by,created_at,phone2,portfolio_files,bio,resume,social_link,is_test)
 - projects(id,code,customer_id,customer_telegram_id,city,category,description,budget,urgency,status,created_at,hired_contractor_id,early_cancel_reason,closed_reason,closed_at,is_test,photo_file_id,posted_vip_at,posted_public_at,rating_reminder_sent,categories)
 - declarations(id,contractor_id,project_code,created_at)
 - applications(id,project_id,project_code,contractor_telegram_id,contractor_name,contractor_phone,contractor_resume,created_at)
@@ -168,8 +168,10 @@ def _normalize_contractor(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
         return None
     item = dict(row)
     item["full_name"] = item.get("full_name") or ""
-    item["credit"] = _safe_int(item.get("credit"), 0)
-    item["credits"] = item["credit"]
+    # ستون واقعی در دیتابیس "credits" (جمع) است؛ اینجا هر دو کلید
+    # "credit" و "credits" رو برای سازگاری با بقیه‌ی کد ست می‌کنیم.
+    item["credits"] = _safe_int(item.get("credits"), 0)
+    item["credit"] = item["credits"]
     item["second_phone"] = item.get("phone2")
     item["social_media"] = item.get("social_link")
     item["portfolio_files"] = item.get("portfolio_files") or []
@@ -545,7 +547,7 @@ def register_contractor(
         "phone": phone,
         "city": city,
         "categories": categories or [],
-        "credit": initial_credit,
+        "credits": initial_credit,
         "is_vip": bool(is_vip),
         "is_test": bool(is_test),
     }
@@ -587,7 +589,7 @@ def update_contractor_profile(contractor_id, updates: Dict[str, Any]) -> bool:
         return True
 
     allowed = {
-        "full_name", "phone", "city", "categories", "credit", "is_vip",
+        "full_name", "phone", "city", "categories", "credits", "is_vip",
         "phone2", "portfolio_files", "bio", "resume", "social_link", "is_test",
     }
 
@@ -598,8 +600,10 @@ def update_contractor_profile(contractor_id, updates: Dict[str, Any]) -> bool:
             continue
         elif key == "name":
             mapped["full_name"] = value
-        elif key == "credits":
-            mapped["credit"] = value
+        elif key in ("credit", "credits"):
+            # ستون واقعی همیشه "credits" است؛ چه کد داخلی "credit"
+            # بفرسته چه "credits"، به همون ستون واقعی نگاشت می‌شه.
+            mapped["credits"] = value
         elif key == "second_phone":
             mapped["phone2"] = value
         elif key == "social_media":
@@ -2353,16 +2357,16 @@ def get_full_dashboard_metrics() -> Dict[str, Any]:
         # ---------- پیمانکارها ----------
         contractors_resp = (
             supabase.table("contractors")
-            .select("id,credit,categories,is_test")
+            .select("id,credits,categories,is_test")
             .execute()
         )
         all_contractors = [c for c in (_data(contractors_resp) or []) if not c.get("is_test")]
 
         m["contractors_total"] = len(all_contractors)
         m["contractors_active"] = len(all_contractors)
-        m["contractors_zero_credit"] = sum(1 for c in all_contractors if (c.get("credit") or 0) <= 0)
+        m["contractors_zero_credit"] = sum(1 for c in all_contractors if (c.get("credits") or 0) <= 0)
         m["contractors_avg_credit"] = (
-            round(sum((c.get("credit") or 0) for c in all_contractors) / len(all_contractors), 1)
+            round(sum((c.get("credits") or 0) for c in all_contractors) / len(all_contractors), 1)
             if all_contractors else 0
         )
 

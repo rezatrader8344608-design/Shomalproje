@@ -262,3 +262,83 @@ BEGIN
     RETURN v_count;
 END;
 $$ LANGUAGE plpgsql;
+
+
+-- ============================================================
+-- MIGRATION: ستون‌ها/جدول‌هایی که db.py واقعاً به آن‌ها نیاز دارد
+-- ولی در دیتابیس واقعی وجود نداشتند (باعث خطای "column/relation
+-- does not exist" در چند تابع می‌شدند). همه‌ی دستورها idempotent
+-- هستند و اجرای دوباره‌شون مشکلی ایجاد نمی‌کنه.
+-- ============================================================
+
+-- customers
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS is_test BOOLEAN DEFAULT false;
+
+-- contractors
+ALTER TABLE contractors ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE contractors ADD COLUMN IF NOT EXISTS phone2 TEXT;
+ALTER TABLE contractors ADD COLUMN IF NOT EXISTS portfolio_files JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE contractors ADD COLUMN IF NOT EXISTS bio TEXT;
+ALTER TABLE contractors ADD COLUMN IF NOT EXISTS social_link TEXT;
+ALTER TABLE contractors ADD COLUMN IF NOT EXISTS is_test BOOLEAN DEFAULT false;
+
+-- تا رکوردهای قدیمی full_name خالی نداشته باشن
+UPDATE contractors SET full_name = name WHERE full_name IS NULL;
+
+-- projects
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS customer_telegram_id BIGINT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS urgency TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS hired_contractor_id BIGINT REFERENCES contractors(id);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS early_cancel_reason TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_test BOOLEAN DEFAULT false;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS posted_vip_at TIMESTAMPTZ;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS posted_public_at TIMESTAMPTZ;
+
+-- بک‌فیل category تکی از روی categories آرایه‌ای
+UPDATE projects
+SET category = categories[1]
+WHERE category IS NULL AND categories IS NOT NULL AND array_length(categories, 1) > 0;
+
+-- بک‌فیل customer_telegram_id از روی جدول customers
+UPDATE projects p
+SET customer_telegram_id = c.telegram_id
+FROM customers c
+WHERE p.customer_id = c.id AND p.customer_telegram_id IS NULL;
+
+-- applications (فیلدهای legacy که db.py هنگام ثبت اعلام آمادگی می‌نویسه)
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS project_code TEXT;
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS contractor_telegram_id BIGINT;
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS contractor_name TEXT;
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS contractor_phone TEXT;
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS contractor_resume TEXT;
+
+-- ratings (بخش تایید نظرات ادمین به is_approved نیاز داره)
+ALTER TABLE ratings ADD COLUMN IF NOT EXISTS project_code TEXT;
+ALTER TABLE ratings ADD COLUMN IF NOT EXISTS contractor_telegram_id BIGINT;
+ALTER TABLE ratings ADD COLUMN IF NOT EXISTS customer_telegram_id BIGINT;
+ALTER TABLE ratings ADD COLUMN IF NOT EXISTS is_approved BOOLEAN DEFAULT false;
+ALTER TABLE ratings ADD COLUMN IF NOT EXISTS customer_comment TEXT;
+
+-- payments (create_payment در db.py با این دو ستون می‌نویسه)
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS telegram_id BIGINT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_type TEXT;
+
+-- جدول‌هایی که db.py صداشون می‌زنه ولی اصلاً وجود نداشتن
+CREATE TABLE IF NOT EXISTS declarations (
+    id BIGSERIAL PRIMARY KEY,
+    contractor_id BIGINT REFERENCES contractors(id),
+    project_code TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_declarations_project_code ON declarations(project_code);
+CREATE INDEX IF NOT EXISTS idx_declarations_contractor ON declarations(contractor_id);
+
+CREATE TABLE IF NOT EXISTS flow_events (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_id BIGINT,
+    flow_type TEXT,
+    event_name TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_flow_events_type ON flow_events(flow_type, event_name);
