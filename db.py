@@ -773,6 +773,7 @@ def create_project_atomic(
         code = generate_project_code()
         payload = {
             "code": code,
+            "project_code": code,  # ستون NOT NULL در دیتابیس واقعی
             "customer_id": customer_id,
             "customer_telegram_id": customer_telegram_id,
             "city": city,
