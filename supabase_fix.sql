@@ -72,3 +72,125 @@ $$ LANGUAGE plpgsql;
 
 -- همسان‌سازی رکوردهای قدیمی که ستون code آن‌ها خالی مانده
 UPDATE projects SET code = project_code WHERE code IS NULL;
+
+
+-- ============================================================
+-- بخش ۲: اعلام آمادگی اتمیک
+-- db.py این تابع را با این امضا صدا می‌زند:
+--   apply_to_project_atomic(p_contractor_id, p_project_code, p_is_vip)
+-- ولی نسخه‌ی قدیمی دیتابیس امضای متفاوتی داشت و 404 می‌داد.
+-- این نسخه: چک تکراری‌نبودن + چک ظرفیت + کسر اعتبار + ثبت
+-- declarations و applications — همه در یک تراکنش.
+-- ============================================================
+
+-- حذف نسخه‌ی قدیمی با امضای متفاوت تا تداخل پیش نیاید
+DROP FUNCTION IF EXISTS apply_to_project_atomic(BIGINT, BIGINT, INT);
+
+CREATE OR REPLACE FUNCTION apply_to_project_atomic(
+    p_contractor_id BIGINT,
+    p_project_code TEXT,
+    p_is_vip BOOLEAN DEFAULT false
+)
+RETURNS TABLE(
+    success BOOLEAN,
+    reason TEXT,
+    remaining_credit INT,
+    applications_count INT,
+    cap_just_reached BOOLEAN
+) AS $$
+DECLARE
+    v_project projects%ROWTYPE;
+    v_cap INT;
+    v_count INT;
+    v_credits INT;
+    v_cap_reached BOOLEAN := false;
+    v_code TEXT;
+BEGIN
+    v_code := upper(trim(p_project_code));
+
+    SELECT * INTO v_project
+    FROM projects
+    WHERE code = v_code OR project_code = v_code
+    LIMIT 1
+    FOR UPDATE;
+
+    IF v_project.id IS NULL THEN
+        RETURN QUERY SELECT false, 'project_not_found'::TEXT, NULL::INT, NULL::INT, false;
+        RETURN;
+    END IF;
+
+    IF v_project.status = 'closed' THEN
+        RETURN QUERY SELECT false, 'project_closed'::TEXT, NULL::INT, NULL::INT, false;
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM declarations d
+        WHERE d.project_code = v_code AND d.contractor_id = p_contractor_id
+    ) THEN
+        RETURN QUERY SELECT false, 'already_applied'::TEXT, NULL::INT, NULL::INT, false;
+        RETURN;
+    END IF;
+
+    SELECT COALESCE(
+        (
+            SELECT s.value::INT FROM app_settings s
+            WHERE s.key = CASE WHEN p_is_vip
+                THEN 'vip_application_cap_count'
+                ELSE 'application_cap_count' END
+        ),
+        10
+    ) INTO v_cap;
+
+    SELECT COUNT(*) INTO v_count FROM declarations d WHERE d.project_code = v_code;
+
+    IF v_count >= v_cap THEN
+        UPDATE projects
+        SET status = 'closed', closed_reason = 'cap_reached', closed_at = now()
+        WHERE id = v_project.id;
+
+        RETURN QUERY SELECT false, 'project_capacity_full'::TEXT, NULL::INT, v_count, false;
+        RETURN;
+    END IF;
+
+    UPDATE contractors
+    SET credits = credits - 1
+    WHERE id = p_contractor_id AND credits > 0
+    RETURNING credits INTO v_credits;
+
+    IF v_credits IS NULL THEN
+        RETURN QUERY SELECT false, 'insufficient_credit'::TEXT, 0, v_count, false;
+        RETURN;
+    END IF;
+
+    INSERT INTO declarations (contractor_id, project_code)
+    VALUES (p_contractor_id, v_code);
+
+    INSERT INTO applications (
+        project_id, contractor_id, project_code,
+        contractor_telegram_id, contractor_name,
+        contractor_phone, contractor_resume
+    )
+    SELECT
+        v_project.id, p_contractor_id, v_code,
+        c.telegram_id, COALESCE(c.full_name, c.name),
+        c.phone, c.resume
+    FROM contractors c
+    WHERE c.id = p_contractor_id;
+
+    UPDATE contractors
+    SET total_applications = COALESCE(total_applications, 0) + 1
+    WHERE id = p_contractor_id;
+
+    v_count := v_count + 1;
+
+    IF v_count >= v_cap THEN
+        UPDATE projects
+        SET status = 'closed', closed_reason = 'cap_reached', closed_at = now()
+        WHERE id = v_project.id;
+        v_cap_reached := true;
+    END IF;
+
+    RETURN QUERY SELECT true, 'ok'::TEXT, v_credits, v_count, v_cap_reached;
+END;
+$$ LANGUAGE plpgsql;

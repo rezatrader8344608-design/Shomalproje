@@ -1227,8 +1227,9 @@ def _apply_to_project_python_fallback(contractor_id, project_code: str, is_vip: 
 
         # کم کردن اعتبار پیمانکار
         try:
+            # ستون واقعی در دیتابیس "credits" است نه "credit"
             supabase.table("contractors").update({
-                "credit": remaining_credit,
+                "credits": remaining_credit,
             }).eq("id", contractor["id"]).execute()
         except Exception as e:
             logger.error(f"fallback apply: خطا در کم کردن credit: {e}")
@@ -1256,7 +1257,7 @@ def _apply_to_project_python_fallback(contractor_id, project_code: str, is_vip: 
             # اگر بعد از کم شدن اعتبار ثبت declaration شکست خورد، اعتبار را برگردانیم
             try:
                 supabase.table("contractors").update({
-                    "credit": current_credit,
+                    "credits": current_credit,
                 }).eq("id", contractor["id"]).execute()
             except Exception as rollback_error:
                 logger.error(f"fallback apply: rollback credit خطا: {rollback_error}")
@@ -1273,6 +1274,7 @@ def _apply_to_project_python_fallback(contractor_id, project_code: str, is_vip: 
         try:
             app_payload = {
                 "project_code": code,
+                "contractor_id": contractor["id"],  # ستون NOT NULL در دیتابیس
                 "contractor_telegram_id": contractor.get("telegram_id"),
                 "contractor_name": contractor.get("full_name"),
                 "contractor_phone": contractor.get("phone"),
@@ -1425,8 +1427,9 @@ def _apply_to_project_python_fallback(contractor_id, project_code: str, is_vip: 
         remaining_credit = current_credit - 1
 
         try:
+            # ستون واقعی در دیتابیس "credits" است نه "credit"
             supabase.table("contractors").update({
-                "credit": remaining_credit,
+                "credits": remaining_credit,
             }).eq("id", contractor["id"]).execute()
         except Exception as e:
             logger.error(f"fallback apply: خطا در کم کردن credit: {e}")
@@ -1449,7 +1452,7 @@ def _apply_to_project_python_fallback(contractor_id, project_code: str, is_vip: 
 
             try:
                 supabase.table("contractors").update({
-                    "credit": current_credit,
+                    "credits": current_credit,
                 }).eq("id", contractor["id"]).execute()
             except Exception as rollback_error:
                 logger.error(f"fallback apply: rollback credit خطا: {rollback_error}")
@@ -1465,6 +1468,7 @@ def _apply_to_project_python_fallback(contractor_id, project_code: str, is_vip: 
         try:
             app_payload = {
                 "project_code": code,
+                "contractor_id": contractor["id"],  # ستون NOT NULL در دیتابیس
                 "contractor_telegram_id": contractor.get("telegram_id"),
                 "contractor_name": contractor.get("full_name"),
                 "contractor_phone": contractor.get("phone"),
