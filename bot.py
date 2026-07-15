@@ -86,6 +86,9 @@ CATEGORIES = [
     "کولر و پکیج",
     "درب و پنجره",
     "دکوراسیون و طراحی داخلی",
+    "طراحی نما و محوطه",
+    "نظافت منزل",
+    "باغبانی",
 ]
 
 URGENCY_LEVELS = [
@@ -206,7 +209,8 @@ async def db_call(func, *args, **kwargs):
     P_RESUME,
     P_SOCIAL,
     P_BIO,
-) = range(400, 407)
+    P_CATEGORIES,
+) = range(400, 408)
 
 (
     ADMIN_MENU,
@@ -243,6 +247,25 @@ BTN_ADMIN_TEST = "🧪 تست کامل فلو"
 CUSTOMER_ROLE = "customer"
 CONTRACTOR_ROLE = "contractor"
 ADMIN_ROLE = "admin"
+
+
+# ============================================================
+# فیلترهای مشترک ورودی مراحل
+# ============================================================
+# نکته مهم: قبلاً هر مرحله از فلوها با TEXT_INPUT_FILTER ساده
+# ثبت می‌شد. این فیلتر متن دکمه‌های لغو/شروع دوباره رو هم به‌عنوان «ورودی همون
+# مرحله» قورت می‌داد و اجازه نمی‌داد پیام به fallbacks برسه - در نتیجه کاربر
+# توی هر خطای ورودی (مثلاً شماره نامعتبر) توی لوپ گیر می‌کرد و دکمه لغو/شروع
+# دوباره عملاً هیچ اثری نداشت. این سه فیلتر زیر، دکمه‌های کنترلی رو صریحاً
+# استثنا می‌کنن تا همیشه به fallbacks برسن.
+
+_CANCEL_RESTART_EXCLUDE = ~filters.Regex(
+    f"^({re.escape(BTN_CANCEL)}|{re.escape(BTN_RESTART)})$"
+)
+
+TEXT_INPUT_FILTER = filters.TEXT & ~filters.COMMAND & _CANCEL_RESTART_EXCLUDE
+PHOTO_INPUT_FILTER = (filters.PHOTO | filters.TEXT) & ~filters.COMMAND & _CANCEL_RESTART_EXCLUDE
+CONTACT_INPUT_FILTER = (filters.CONTACT | filters.TEXT) & ~filters.COMMAND & _CANCEL_RESTART_EXCLUDE
 
 
 # ============================================================
@@ -372,6 +395,7 @@ def kb_edit_profile_menu():
     return ReplyKeyboardMarkup(
         [
             ["✏️ نام و نام خانوادگی"],
+            ["📂 ویرایش دسته‌بندی"],
             ["📱 افزودن/ویرایش شماره دوم"],
             ["🖼 افزودن نمونه کار"],
             ["📄 ویرایش رزومه"],
@@ -1937,6 +1961,18 @@ async def p_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return P_FULLNAME
 
+    if text == "📂 ویرایش دسته‌بندی":
+        contractor = context.user_data["editing_contractor"]
+        current = list(contractor.get("categories") or [])
+        context.user_data["editing_categories"] = current
+
+        await update.message.reply_text(
+            f"دسته‌بندی‌های فعلی: {', '.join(current) if current else 'هیچ‌کدام'}\n"
+            "روی هرکدوم بزنید تا انتخاب/لغو بشه، در پایان دکمه پایان رو بزنید:",
+            reply_markup=kb_categories(current),
+        )
+        return P_CATEGORIES
+
     if text == "📱 افزودن/ویرایش شماره دوم":
         await update.message.reply_text(
             "شماره دوم خود را وارد کنید یا به اشتراک بگذارید:",
@@ -1991,6 +2027,51 @@ async def p_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     return P_MENU
+
+
+async def p_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    selected = context.user_data.setdefault("editing_categories", [])
+
+    if text == "🏁 پایان انتخاب دسته‌بندی‌ها":
+        if not selected:
+            await update.message.reply_text(
+                "لطفاً حداقل یک دسته‌بندی انتخاب کنید.",
+                reply_markup=kb_categories(selected),
+            )
+            return P_CATEGORIES
+
+        contractor = context.user_data["editing_contractor"]
+        await db_call(db.update_contractor_profile, contractor["id"], {"categories": selected})
+        contractor["categories"] = selected
+
+        await update.message.reply_text(
+            "✅ دسته‌بندی‌ها بروزرسانی شد.",
+            reply_markup=kb_edit_profile_menu(),
+        )
+        context.user_data.pop("editing_categories", None)
+        return P_MENU
+
+    cat = text.replace("✅ ", "").strip()
+
+    if cat not in CATEGORIES:
+        await update.message.reply_text(
+            "لطفاً از دکمه‌های موجود انتخاب کنید.",
+            reply_markup=kb_categories(selected),
+        )
+        return P_CATEGORIES
+
+    if cat in selected:
+        selected.remove(cat)
+    else:
+        selected.append(cat)
+
+    await update.message.reply_text(
+        f"دسته‌بندی‌های انتخابی: {', '.join(selected) if selected else 'هیچ‌کدام'}",
+        reply_markup=kb_categories(selected),
+    )
+
+    return P_CATEGORIES
 
 
 async def p_phone2(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2110,37 +2191,71 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
 
-    stats = await db_call(db.get_dashboard_stats)
-    close_reasons = await db_call(db.get_close_reason_stats)
-    early_close = await db_call(db.get_early_close_stats)
+    await update.message.reply_text("⏳ در حال محاسبه متریک‌ها...")
 
-    reasons_text = "\n".join(
-        [
-            f"  • {r}: {p}٪"
-            for r, p in close_reasons.items()
-        ]
-    ) or "  داده‌ای موجود نیست"
+    m = await db_call(db.get_full_dashboard_metrics)
+    if not m:
+        m = {}
+
+    city_lines = "\n".join(
+        f"  • {k}: {v}" for k, v in m.get("projects_by_city", {}).items()
+    ) or "  —"
+    cat_lines = "\n".join(
+        f"  • {k}: {v}" for k, v in m.get("projects_by_category", {}).items()
+    ) or "  —"
+    contractor_cat_lines = "\n".join(
+        f"  • {k}: {v}" for k, v in m.get("contractors_by_category", {}).items()
+    ) or "  —"
+    avg_by_cat_lines = "\n".join(
+        f"  • {k}: {v}" for k, v in m.get("avg_applications_by_category", {}).items()
+    ) or "  —"
+    closed_reason_lines = "\n".join(
+        f"  • {k}: {v}" for k, v in m.get("closed_no_response_reasons", {}).items()
+    ) or "  —"
 
     text = (
-        "📊 <b>داشبورد مدیریت</b>\n\n"
-        f"📁 کل پروژه‌ها: {stats.get('total_projects', 0)}\n"
-        f"🟢 پروژه‌های باز: {stats.get('open_projects', 0)}\n"
-        f"🔴 پروژه‌های بسته‌شده: {stats.get('closed_projects', 0)}\n"
-        f"⭐ پروژه‌های VIP: {stats.get('vip_projects', 0)}\n\n"
-        f"👷 کل پیمانکارها: {stats.get('total_contractors', 0)}\n"
-        f"💎 پیمانکاران VIP: {stats.get('vip_contractors', 0)}\n"
-        f"📩 کل اعلام آمادگی‌ها: {stats.get('total_declarations', 0)}\n\n"
-        f"💰 مجموع پرداخت‌ها: {stats.get('total_payments', 0):,.0f} تومان\n\n"
-        f"📉 <b>دلایل بستن پروژه‌ها:</b>\n{reasons_text}\n\n"
-        f"⚠️ <b>انصراف پیش از حد نصاب:</b>\n"
-        f"از {early_close.get('total_closed', 0)} پروژه بسته‌شده، "
-        f"{early_close.get('early_closed', 0)} مورد "
-        f"({early_close.get('early_close_pct', 0)}٪) زود بسته شده‌اند."
+        "📊 داشبورد شمال‌پروژه\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🏗 پروژه‌ها\n"
+        f"امروز: {m.get('projects_today', 0)} | این هفته: {m.get('projects_week', 0)} | "
+        f"این ماه: {m.get('projects_month', 0)}\n"
+        f"کل: {m.get('projects_total', 0)}\n"
+        f"به تفکیک شهر:\n{city_lines}\n"
+        f"به تفکیک دسته:\n{cat_lines}\n\n"
+
+        "📈 نرخ تکمیل فلو مشتری\n"
+        f"شروع‌کرده: {m.get('customer_funnel_started', 0)} | "
+        f"تکمیل‌کرده: {m.get('customer_funnel_completed', 0)}\n"
+        f"نرخ تکمیل: {m.get('customer_funnel_rate', 0)}٪\n\n"
+
+        "👷 پیمانکارها\n"
+        f"کل: {m.get('contractors_total', 0)} | فعال: {m.get('contractors_active', 0)}\n"
+        f"اعتبار صفرشده: {m.get('contractors_zero_credit', 0)}\n"
+        f"میانگین اعتبار: {m.get('contractors_avg_credit', 0)}\n"
+        f"به تفکیک دسته:\n{contractor_cat_lines}\n\n"
+
+        "🔗 اتصال دو طرف\n"
+        f"کل اعلام آمادگی: {m.get('applications_total', 0)}\n"
+        f"میانگین اعلام آمادگی به ازای هر پروژه: {m.get('avg_applications_per_project', 0)}\n"
+        f"میانگین اعلام آمادگی به تفکیک دسته (برای تنظیم سقف):\n{avg_by_cat_lines}\n"
+        f"⚠️ پروژه‌های بدون پاسخ: {m.get('projects_no_response', 0)}\n"
+        f"نسبت پروژه به پیمانکار فعال: {m.get('project_to_contractor_ratio', 0)}\n\n"
+
+        "🔒 دلایل بستن پروژه بدون اعلام آمادگی\n"
+        f"{closed_reason_lines}\n\n"
+
+        "🌟 وی‌آی‌پی\n"
+        f"پروژه‌های با تاخیر وی‌آی‌پی ارسال‌شده: {m.get('vip_delayed_projects', 0)}\n\n"
+
+        "💳 پرداخت‌ها\n"
+        f"در انتظار تایید: {m.get('payments_pending', 0)}\n"
+        f"تایید شده: {m.get('payments_approved', 0)}\n"
+        f"رها شده: {m.get('payments_abandoned', 0)} ({m.get('payments_abandon_rate', 0)}٪)\n"
     )
 
     await update.message.reply_text(
         text,
-        parse_mode=ParseMode.HTML,
         reply_markup=kb_admin_main(),
     )
 
@@ -2327,22 +2442,16 @@ async def admin_test_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if CONTRACTOR_CHANNEL_ID:
-            msg = await context.bot.send_message(
-                chat_id=CONTRACTOR_CHANNEL_ID,
-                text="🧪 پیام تست سلامت ربات",
-            )
-            await context.bot.delete_message(
-                chat_id=CONTRACTOR_CHANNEL_ID,
-                message_id=msg.message_id,
-            )
+            # فقط بررسی دسترسی ربات به کانال - بدون ارسال هیچ پیام قابل‌مشاهده‌ای
+            await context.bot.get_chat(chat_id=CONTRACTOR_CHANNEL_ID)
         else:
             channel_ok = False
 
     except TelegramError as e:
-        logger.error(f"تست کانال پیمانکاران ناموفق: {e}")
+        logger.error(f"بررسی دسترسی به کانال پیمانکاران ناموفق: {e}")
         channel_ok = False
 
-    results.append(("ارسال به کانال پیمانکاران", channel_ok))
+    results.append(("دسترسی به کانال پیمانکاران", channel_ok))
 
     ai_ok = True
 
@@ -2532,28 +2641,28 @@ def main():
         ],
         states={
             C_CITY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, np_city)
+                MessageHandler(TEXT_INPUT_FILTER, np_city)
             ],
             C_CATEGORY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, np_category)
+                MessageHandler(TEXT_INPUT_FILTER, np_category)
             ],
             C_DESCRIPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, np_description)
+                MessageHandler(TEXT_INPUT_FILTER, np_description)
             ],
             C_PHOTO: [
                 MessageHandler(
-                    (filters.PHOTO | filters.TEXT) & ~filters.COMMAND,
+                    PHOTO_INPUT_FILTER,
                     np_photo,
                 )
             ],
             C_BUDGET: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, np_budget)
+                MessageHandler(TEXT_INPUT_FILTER, np_budget)
             ],
             C_URGENCY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, np_urgency)
+                MessageHandler(TEXT_INPUT_FILTER, np_urgency)
             ],
             C_CONFIRM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, np_confirm)
+                MessageHandler(TEXT_INPUT_FILTER, np_confirm)
             ],
         },
         fallbacks=fallbacks_cancel,
@@ -2568,7 +2677,7 @@ def main():
         ],
         states={
             TRACK_CODE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, track_code)
+                MessageHandler(TEXT_INPUT_FILTER, track_code)
             ]
         },
         fallbacks=fallbacks_cancel,
@@ -2583,19 +2692,19 @@ def main():
         ],
         states={
             CLOSE_CODE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, close_code)
+                MessageHandler(TEXT_INPUT_FILTER, close_code)
             ],
             CLOSE_REASON: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, close_reason)
+                MessageHandler(TEXT_INPUT_FILTER, close_reason)
             ],
             CLOSE_PICK_CONTRACTOR: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, close_pick_contractor)
+                MessageHandler(TEXT_INPUT_FILTER, close_pick_contractor)
             ],
             CLOSE_RATING_SCORE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, close_rating_score)
+                MessageHandler(TEXT_INPUT_FILTER, close_rating_score)
             ],
             CLOSE_RATING_COMMENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, close_rating_comment)
+                MessageHandler(TEXT_INPUT_FILTER, close_rating_comment)
             ],
         },
         fallbacks=fallbacks_cancel,
@@ -2611,37 +2720,39 @@ def main():
         ],
         states={
             R_FULLNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_fullname)
+                MessageHandler(TEXT_INPUT_FILTER, r_fullname)
             ],
             R_PHONE: [
                 MessageHandler(
-                    (filters.CONTACT | filters.TEXT) & ~filters.COMMAND,
+                    CONTACT_INPUT_FILTER,
                     r_phone,
                 )
             ],
             R_CITY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_city)
+                MessageHandler(TEXT_INPUT_FILTER, r_city)
             ],
             R_CATEGORIES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_categories)
+                MessageHandler(TEXT_INPUT_FILTER, r_categories)
             ],
             R_EXTRA_CHOICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_extra_choice)
+                MessageHandler(TEXT_INPUT_FILTER, r_extra_choice)
             ],
             R_EXTRA_PORTFOLIO: [
                 MessageHandler(
-                    (filters.PHOTO | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND,
+                    (filters.PHOTO | filters.Document.ALL | filters.TEXT)
+                    & ~filters.COMMAND
+                    & _CANCEL_RESTART_EXCLUDE,
                     r_extra_portfolio,
                 )
             ],
             R_EXTRA_RESUME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_extra_resume)
+                MessageHandler(TEXT_INPUT_FILTER, r_extra_resume)
             ],
             R_EXTRA_SOCIAL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_extra_social)
+                MessageHandler(TEXT_INPUT_FILTER, r_extra_social)
             ],
             R_EXTRA_BIO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, r_extra_bio)
+                MessageHandler(TEXT_INPUT_FILTER, r_extra_bio)
             ],
         },
         fallbacks=fallbacks_cancel,
@@ -2656,28 +2767,33 @@ def main():
         ],
         states={
             P_MENU: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, p_menu)
+                MessageHandler(TEXT_INPUT_FILTER, p_menu)
             ],
             P_FULLNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, p_fullname)
+                MessageHandler(TEXT_INPUT_FILTER, p_fullname)
+            ],
+            P_CATEGORIES: [
+                MessageHandler(TEXT_INPUT_FILTER, p_categories)
             ],
             P_PHONE2: [
                 MessageHandler(
-                    (filters.CONTACT | filters.TEXT) & ~filters.COMMAND,
+                    CONTACT_INPUT_FILTER,
                     p_phone2,
                 )
             ],
             P_PORTFOLIO: [
                 MessageHandler(
-                    (filters.PHOTO | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND,
+                    (filters.PHOTO | filters.Document.ALL | filters.TEXT)
+                    & ~filters.COMMAND
+                    & _CANCEL_RESTART_EXCLUDE,
                     p_portfolio,
                 )
             ],
             P_RESUME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, p_resume)
+                MessageHandler(TEXT_INPUT_FILTER, p_resume)
             ],
             P_SOCIAL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, p_social)
+                MessageHandler(TEXT_INPUT_FILTER, p_social)
             ],
         },
         fallbacks=fallbacks_cancel,
@@ -2699,7 +2815,7 @@ def main():
             ],
             ADMIN_SET_VALUE: [
                 MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
+                    TEXT_INPUT_FILTER,
                     admin_set_value,
                 )
             ],

@@ -85,6 +85,20 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
+def _parse_dt(value):
+    """پارس امن رشته‌ی تاریخ - چه با timezone چه بدون آن."""
+    if not value:
+        return None
+    try:
+        s = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 def _safe_float(value, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -2261,9 +2275,174 @@ def get_weekly_leads_report():
         return []
 
 
-# ============================================================
-# Compatibility Aliases
-# ============================================================
+def get_full_dashboard_metrics() -> Dict[str, Any]:
+    """
+    نسخه‌ی کامل و غنی متریک‌های داشبورد ادمین.
+    داده‌های is_test=True از همه‌ی محاسبات کنار گذاشته می‌شن تا آمار واقعی خراب نشه.
+    """
+    m: Dict[str, Any] = {}
+
+    try:
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = now - timedelta(days=7)
+        month_start = now - timedelta(days=30)
+
+        # ---------- پروژه‌ها ----------
+        proj_resp = (
+            supabase.table("projects")
+            .select(
+                "id,code,city,category,categories,status,created_at,"
+                "closed_reason,early_cancel_reason,is_test,posted_vip_at"
+            )
+            .execute()
+        )
+        all_projects = [p for p in (_data(proj_resp) or []) if not p.get("is_test")]
+
+        m["projects_total"] = len(all_projects)
+        m["projects_today"] = sum(
+            1 for p in all_projects
+            if (dt := _parse_dt(p.get("created_at"))) and dt >= today_start
+        )
+        m["projects_week"] = sum(
+            1 for p in all_projects
+            if (dt := _parse_dt(p.get("created_at"))) and dt >= week_start
+        )
+        m["projects_month"] = sum(
+            1 for p in all_projects
+            if (dt := _parse_dt(p.get("created_at"))) and dt >= month_start
+        )
+
+        by_city: Dict[str, int] = {}
+        by_category: Dict[str, int] = {}
+        code_to_categories: Dict[str, list] = {}
+
+        for p in all_projects:
+            city = p.get("city") or "نامشخص"
+            by_city[city] = by_city.get(city, 0) + 1
+
+            cats = p.get("categories") or ([p["category"]] if p.get("category") else [])
+            code_to_categories[p.get("code")] = cats
+            for c in cats:
+                by_category[c] = by_category.get(c, 0) + 1
+
+        m["projects_by_city"] = by_city
+        m["projects_by_category"] = by_category
+
+        # ---------- نرخ تکمیل فلو مشتری ----------
+        started_resp = (
+            supabase.table("flow_events")
+            .select("telegram_id", count="exact")
+            .eq("flow_type", "customer_new_project")
+            .eq("event_name", "start")
+            .execute()
+        )
+        completed_resp = (
+            supabase.table("flow_events")
+            .select("telegram_id", count="exact")
+            .eq("flow_type", "customer_new_project")
+            .eq("event_name", "completed")
+            .execute()
+        )
+        started_n = _count(started_resp) or 0
+        completed_n = _count(completed_resp) or 0
+        m["customer_funnel_started"] = started_n
+        m["customer_funnel_completed"] = completed_n
+        m["customer_funnel_rate"] = round((completed_n / started_n) * 100, 1) if started_n else 0.0
+
+        # ---------- پیمانکارها ----------
+        contractors_resp = (
+            supabase.table("contractors")
+            .select("id,credit,categories,is_test")
+            .execute()
+        )
+        all_contractors = [c for c in (_data(contractors_resp) or []) if not c.get("is_test")]
+
+        m["contractors_total"] = len(all_contractors)
+        m["contractors_active"] = len(all_contractors)
+        m["contractors_zero_credit"] = sum(1 for c in all_contractors if (c.get("credit") or 0) <= 0)
+        m["contractors_avg_credit"] = (
+            round(sum((c.get("credit") or 0) for c in all_contractors) / len(all_contractors), 1)
+            if all_contractors else 0
+        )
+
+        contractor_by_cat: Dict[str, int] = {}
+        for c in all_contractors:
+            for cat in (c.get("categories") or []):
+                contractor_by_cat[cat] = contractor_by_cat.get(cat, 0) + 1
+        m["contractors_by_category"] = contractor_by_cat
+
+        # ---------- اتصال دو طرف (اعلام آمادگی) ----------
+        # هم جدول جدید (declarations) و هم جدول قدیمی (applications) شمرده میشن
+        decl_resp = supabase.table("declarations").select("project_code").execute()
+        declarations = _data(decl_resp) or []
+
+        legacy_resp = supabase.table("applications").select("project_code").execute()
+        legacy_apps = _data(legacy_resp) or []
+
+        apps_by_code: Dict[str, int] = {}
+        for row in declarations + legacy_apps:
+            code = row.get("project_code")
+            if code:
+                apps_by_code[code] = apps_by_code.get(code, 0) + 1
+
+        total_applications = len(declarations) + len(legacy_apps)
+        m["applications_total"] = total_applications
+        m["avg_applications_per_project"] = (
+            round(total_applications / len(all_projects), 1) if all_projects else 0
+        )
+
+        cat_totals: Dict[str, int] = {}
+        cat_counts: Dict[str, int] = {}
+        for p in all_projects:
+            code = p.get("code")
+            count_for_project = apps_by_code.get(code, 0)
+            for cat in code_to_categories.get(code, []):
+                cat_totals[cat] = cat_totals.get(cat, 0) + count_for_project
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+        m["avg_applications_by_category"] = {
+            cat: round(cat_totals[cat] / cat_counts[cat], 1) for cat in cat_totals
+        }
+
+        m["projects_no_response"] = sum(
+            1 for p in all_projects if apps_by_code.get(p.get("code"), 0) == 0
+        )
+
+        m["project_to_contractor_ratio"] = (
+            round(len(all_projects) / m["contractors_active"], 2)
+            if m["contractors_active"] else 0
+        )
+
+        # ---------- دلایل بستن پروژه بدون اعلام آمادگی ----------
+        reason_counts: Dict[str, int] = {}
+        for p in all_projects:
+            if p.get("status") == "closed" and apps_by_code.get(p.get("code"), 0) == 0:
+                reason = p.get("early_cancel_reason") or p.get("closed_reason") or "نامشخص"
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        m["closed_no_response_reasons"] = reason_counts
+
+        # ---------- وی‌آی‌پی ----------
+        m["vip_delayed_projects"] = sum(1 for p in all_projects if p.get("posted_vip_at"))
+
+        # ---------- پرداخت‌ها ----------
+        pay_resp = supabase.table("payments").select("status").execute()
+        payments = _data(pay_resp) or []
+        m["payments_pending"] = sum(1 for x in payments if x.get("status") == "pending")
+        m["payments_approved"] = sum(1 for x in payments if x.get("status") == "approved")
+        rejected_n = sum(1 for x in payments if x.get("status") == "rejected")
+        m["payments_abandoned"] = rejected_n
+        m["payments_abandon_rate"] = (
+            round((rejected_n / len(payments)) * 100, 1) if payments else 0
+        )
+
+    except Exception as e:
+        logger.error(f"get_full_dashboard_metrics خطا: {e}")
+
+    return m
+
+
+
 
 def get_customer(telegram_id: int):
     return get_customer_by_telegram_id(telegram_id)
