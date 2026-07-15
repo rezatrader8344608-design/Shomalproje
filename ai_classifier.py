@@ -44,6 +44,21 @@ NVIDIA_API_BASE_URL = (
     or "https://integrate.api.nvidia.com/v1/chat/completions"
 ).strip()
 
+GROQ_API_KEY = (
+    os.getenv("GROQ_API_KEY")
+    or ""
+).strip()
+
+GROQ_MODEL = (
+    os.getenv("GROQ_MODEL")
+    or "llama-3.3-70b-versatile"
+).strip()
+
+GROQ_API_BASE_URL = (
+    os.getenv("GROQ_API_BASE_URL")
+    or "https://api.groq.com/openai/v1/chat/completions"
+).strip()
+
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "20"))
 
 
@@ -520,20 +535,20 @@ def fallback_classify_project(text: str) -> Dict[str, Any]:
 
 
 # ============================================================
-# ارتباط اختیاری با NVIDIA API
+# ارتباط اختیاری با سرویس‌های هوش مصنوعی (Groq / NVIDIA)
 # ============================================================
 
-def _call_nvidia_chat(prompt: str) -> Optional[str]:
+def _call_openai_compatible_chat(base_url: str, api_key: str, model: str, prompt: str) -> Optional[str]:
     """
-    ارتباط با NVIDIA NIM/OpenAI-compatible endpoint.
+    ارتباط عمومی با هر endpoint سازگار با OpenAI (Groq، NVIDIA NIM و مشابه).
     اگر کلید API تنظیم نشده باشد یا خطا بدهد، None برمی‌گرداند.
     """
-    if not NVIDIA_API_KEY:
+    if not api_key:
         return None
 
     try:
         payload = {
-            "model": NVIDIA_MODEL,
+            "model": model,
             "messages": [
                 {
                     "role": "system",
@@ -554,12 +569,12 @@ def _call_nvidia_chat(prompt: str) -> Optional[str]:
         data = json.dumps(payload).encode("utf-8")
 
         request = urllib.request.Request(
-            NVIDIA_API_BASE_URL,
+            base_url,
             data=data,
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
             },
         )
 
@@ -584,18 +599,27 @@ def _call_nvidia_chat(prompt: str) -> Optional[str]:
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             body = ""
-        logger.warning(f"NVIDIA HTTP error: {e.code} - {body}")
+        logger.warning(f"AI API HTTP error ({base_url}): {e.code} - {body}")
         return None
 
     except Exception as e:
-        logger.warning(f"NVIDIA API unavailable: {e}")
+        logger.warning(f"AI API unavailable ({base_url}): {e}")
         return None
+
+
+def _call_groq_chat(prompt: str) -> Optional[str]:
+    return _call_openai_compatible_chat(GROQ_API_BASE_URL, GROQ_API_KEY, GROQ_MODEL, prompt)
+
+
+def _call_nvidia_chat(prompt: str) -> Optional[str]:
+    return _call_openai_compatible_chat(NVIDIA_API_BASE_URL, NVIDIA_API_KEY, NVIDIA_MODEL, prompt)
 
 
 def ai_classify_project(text: str) -> Optional[Dict[str, Any]]:
     """
-    دسته‌بندی با AI، در صورت فعال بودن API.
-    اگر AI خطا بدهد، None برمی‌گرداند.
+    دسته‌بندی با AI.
+    ابتدا Groq (رایگان) امتحان می‌شود؛ اگر جواب نداد یا خطا داد، NVIDIA امتحان می‌شود.
+    اگر هیچ‌کدام جواب ندهند، None برمی‌گرداند (و caller باید به fallback داخلی برود).
     """
     cleaned = clean_text(text)
 
@@ -639,7 +663,13 @@ def ai_classify_project(text: str) -> Optional[Dict[str, Any]]:
 {cleaned}
 """.strip()
 
-    content = _call_nvidia_chat(prompt)
+    content = _call_groq_chat(prompt)
+    source = "groq"
+
+    if not content:
+        content = _call_nvidia_chat(prompt)
+        source = "nvidia"
+
     if not content:
         return None
 
@@ -677,7 +707,7 @@ def ai_classify_project(text: str) -> Optional[Dict[str, Any]]:
 
     return {
         "success": True,
-        "source": "ai",
+        "source": source,
         "cleaned_text": ai_cleaned_text,
         "city": city,
         "category": category,
