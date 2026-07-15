@@ -69,7 +69,7 @@ CONTRACTOR_CHANNEL_ID = int(
     or "0"
 )
 
-CONTRACTOR_PRIVATE_LINK = "https://t.me/+vOokjkXmh-VjMzRk"
+CONTRACTOR_PRIVATE_LINK = "https://t.me/+o0h74mgG-HgyYjU0"
 
 # VIP فعلاً غیرفعال است.
 VIP_ENABLED = False
